@@ -3,6 +3,8 @@ from FundamentalAnalysis import FundamentalAnalysis
 from RatingEngine import RatingEngine
 from ResultBuilder import ResultBuilder
 from StockMap import resolve_ticker
+from Valuation import simple_valuation
+
 
 def run_analysis():
     user_input = input("Enter a stock name or ticker: ")
@@ -10,12 +12,14 @@ def run_analysis():
 
     print(f"Resolved ticker: {ticker}")
 
+    # Fetch financial data
     fetcher = DataFetcher(ticker)
     income = fetcher.get_income_statement()
     balance = fetcher.get_balance_sheet()
     cashflow = fetcher.get_cashflow()
     info = fetcher.get_info()
 
+    # Fundamental analysis
     analysis = FundamentalAnalysis(income, balance, cashflow, info)
 
     indicators = {
@@ -42,8 +46,21 @@ def run_analysis():
 
     score = RatingEngine.compute_global_score(ratings)
 
+    # Valuation analysis
+    valuation_info = simple_valuation(info)
+
+    # Build report
     report = ResultBuilder().build_text_report(ticker, indicators, ratings, score)
+
+    # Append valuation to report
+    report += "\n\n--- Valuation ---\n"
+    for ratio, val in valuation_info["valuation_ratios"].items():
+        report += f"{ratio}: {val}\n"
+    report += f"Current Price: {valuation_info['current_price']}\n"
+    report += f"Suggested Entry Price: {valuation_info['suggested_entry']}\n"
+
     print(report)
+
 
 if __name__ == "__main__":
     run_analysis()

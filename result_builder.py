@@ -26,8 +26,8 @@ class ResultBuilder:
         for key, val in ratings.items():
             report.append(f"{key}: {val}")
 
-        report.append("\n--- Global Score ---")
-        report.append(f"Score: {score}/6")
+        report.append("\n-- Global Rating --")
+        report.append(f"Score: {score:.1f} / 100")
 
         if score >= 5:
             report.append("Verdict: High‑quality company with strong long‑term outlook.")

@@ -140,14 +140,17 @@ class TickerResolver:
 
         # Step 1: internal map
         if clean in self.STOCK_MAP:
+            print(f"Resolved ticker: {user_input} -> {self.STOCK_MAP[clean]}")
             return self.STOCK_MAP[clean]
 
         # Step 2: Yahoo autocomplete
         ticker = self._yahoo_autocomplete(clean)
         if ticker:
+            print(f"Resolved ticker: {ticker}")
             return ticker.upper()
 
         # Step 3: fallback — assume input is already a ticker
+        print(f"fallback assuming the input {user_input} is a ticker")
         return user_input.strip().upper()
 
 def resolve_ticker(user_input: str) -> str:

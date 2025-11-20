@@ -1,54 +1,58 @@
 # main.py
 """
-Main CLI orchestrator for FondaWork (Option 3).
-Handles: ticker resolution, data fetch, fundamentals, valuation, ratings, peers.
+Main CLI orchestrator for FondaWork (Sector-aware version).
+Handles ticker resolution, data fetch, sector profiles, fundamentals,
+valuation, ratings, and peer comparisons.
 """
 
 from data_fetcher import DataFetcher
+from sector_profiles import SectorProfiles
+
 from growth import compute_revenue_growth, compute_net_income_growth
 from profitability import (
     compute_operating_margin, compute_net_margin,
     compute_roic, compute_roe, compute_roa
 )
-from valuation import consolidate_valuation, safe_intrinsic_price
+from valuation import consolidate_valuation, fair_value_from_multiples, safe_intrinsic_price
 from rating_engine import RatingEngine
 from ticker_resolver import TickerResolver
 from industry import peers_median
 
 import json
 
+
+# ------------------------------------------------------
+# Formatting helpers
+# ------------------------------------------------------
 def fmt(x):
-    """Format floats to 2 decimals."""
     try:
         return f"{float(x):.2f}"
-    except:
+    except Exception:
         return str(x)
 
 def fmt_pct(x):
-    """Format percent values: 12.34%."""
     try:
         return f"{float(x):.2f}%"
-    except:
+    except Exception:
         return str(x)
 
 
-def format_pct(x):
-    return f"{x:.2f}%" if isinstance(x, float) else str(x)
-
-
+# ------------------------------------------------------
+# MAIN PIPELINE
+# ------------------------------------------------------
 def run():
-    # -----------------------------
-    # 1) Resolve ticker
-    # -----------------------------
+    # --------------------------------------------------
+    # 1) Ticker resolution
+    # --------------------------------------------------
     user_input = input("Enter stock name or ticker: ").strip()
 
     resolver = TickerResolver()
     ticker = resolver.resolve(user_input)
-    print(f"Resolved ticker: {ticker}")
 
-    # -----------------------------
-    # 2) Fetch market data
-    # -----------------------------
+
+    # --------------------------------------------------
+    # 2) Fetch data
+    # --------------------------------------------------
     fetcher = DataFetcher(ticker)
 
     if not fetcher.validate_ticker():
@@ -60,144 +64,166 @@ def run():
     cash = fetcher.get_cashflow()
     info = fetcher.get_info()
 
-    # -----------------------------
-    # 3) Growth metrics
-    # -----------------------------
-    rev_growth = compute_revenue_growth(income, years=5)
-    ni_growth = compute_net_income_growth(income, years=5)
+    # --------------------------------------------------
+    # 3) Determine SECTOR PROFILE
+    # --------------------------------------------------
+    profile = SectorProfiles.get_profile(info)
+    enabled = profile["metrics"]
+    thresholds = profile["thresholds"]
+    weights = profile["weights"]
+    preferred_multiples = profile["preferred_multiples"]
 
-    # -----------------------------
-    # 4) Profitability
-    # -----------------------------
-    op_margin = compute_operating_margin(info)
-    net_margin = compute_net_margin(info)
-    roe = compute_roe(info)
-    roa = compute_roa(info)
-    roic = compute_roic(income, balance, info)
+    # --------------------------------------------------
+    # 4) Compute only enabled metrics
+    # --------------------------------------------------
+    metrics = {}
 
-    # -----------------------------
-    # 5) Free Cash Flow extraction
-    # -----------------------------
+    if enabled.get("revenue_growth"):
+        metrics["revenue_growth"] = compute_revenue_growth(income, years=5)
+
+    if enabled.get("net_income_growth"):
+        metrics["net_income_growth"] = compute_net_income_growth(income, years=5)
+
+    if enabled.get("operating_margin"):
+        metrics["operating_margin"] = compute_operating_margin(info)
+
+    if enabled.get("net_margin"):
+        metrics["net_margin"] = compute_net_margin(info)
+
+    if enabled.get("roe"):
+        metrics["roe"] = compute_roe(info)
+
+    if enabled.get("roa"):
+        metrics["roa"] = compute_roa(info)
+
+    if enabled.get("roic"):
+        metrics["roic"] = compute_roic(income, balance, info)
+
+    # --------------------------------------------------
+    # 5) Extract Free Cash Flow (FCF) if needed
+    # --------------------------------------------------
     fcf = None
-    try:
-        if not cash.empty:
-            # Direct FCF keys
-            for col in ["Free Cash Flow", "FreeCashFlow", "freeCashflow"]:
-                if col in cash.columns and not cash[col].dropna().empty:
-                    fcf = float(cash[col].dropna().iloc[-1])
-                    break
-
-            # Fallback CFO - Capex
-            if fcf is None:
-                cfo_keys = [
-                    "Total Cash From Operating Activities",
-                    "Operating Cash Flow",
-                    "cashFlowFromOperations"
-                ]
-                capex_keys = [
-                    "Capital Expenditures",
-                    "capitalExpenditures",
-                    "Capex"
-                ]
-
-                cfo = None
-                capex = None
-
-                for k in cfo_keys:
-                    if k in cash.columns and not cash[k].dropna().empty:
-                        cfo = float(cash[k].dropna().iloc[-1])
+    if enabled.get("fcf"):
+        try:
+            if not cash.empty:
+                for col in ["Free Cash Flow", "FreeCashFlow", "freeCashflow"]:
+                    if col in cash.columns and not cash[col].dropna().empty:
+                        fcf = float(cash[col].dropna().iloc[-1])
                         break
 
-                for k in capex_keys:
-                    if k in cash.columns and not cash[k].dropna().empty:
-                        capex = float(cash[k].dropna().iloc[-1])
-                        break
+                if fcf is None:
+                    cfo = None
+                    capex = None
 
-                if cfo is not None:
-                    fcf = cfo - (capex or 0)
-    except Exception:
-        fcf = None
+                    for k in ["Total Cash From Operating Activities",
+                              "Operating Cash Flow", "cashFlowFromOperations"]:
+                        if k in cash.columns and not cash[k].dropna().empty:
+                            cfo = float(cash[k].dropna().iloc[-1])
+                            break
 
-    # -----------------------------
+                    for k in ["Capital Expenditures",
+                              "capitalExpenditures", "Capex"]:
+                        if k in cash.columns and not cash[k].dropna().empty:
+                            capex = float(cash[k].dropna().iloc[-1])
+                            break
+
+                    if cfo is not None:
+                        fcf = cfo - (capex or 0)
+        except Exception:
+            fcf = None
+
+        metrics["fcf"] = fcf
+
+    # --------------------------------------------------
     # 6) Peer tickers
-    # -----------------------------
-    peer_input = input("Optional: enter comma-separated peer tickers for industry comparison (or press Enter): ").strip()
-
+    # --------------------------------------------------
+    peer_input = input("Optional: peer tickers (comma-separated): ").strip()
     raw_peers = [p.strip() for p in peer_input.split(',')] if peer_input else []
     peers = []
 
     for p in raw_peers:
         try:
-            resolved = resolver.resolve(p)
-            peers.append(resolved)
+            peers.append(resolver.resolve(p))
         except Exception:
-            print(f"Warning: could not resolve peer '{p}'. Skipping.")
+            print(f"Warning: unable to resolve peer '{p}'. Skipping.")
 
-    # -----------------------------
-    # 7) Valuation (DCF + Multiples)
-    # -----------------------------
-    val = consolidate_valuation(
+    # --------------------------------------------------
+    # 7) Valuation (sector-aware)
+    # --------------------------------------------------
+    valuation = consolidate_valuation(
         info,
         fcf_now=fcf,
         forecast_growths=[0.08] * 5 if fcf else None,
         terminal_growth=0.02,
-        wacc=None
+        wacc=None,
+        profile=profile  
     )
+
 
     peer_medians = peers_median(peers, ["PE", "PB", "EV/EBITDA"]) if peers else {}
 
-    # -----------------------------
-    # 8) Ratings
-    # -----------------------------
-    ratings = {
-        "Revenue Growth": RatingEngine.rate_value(rev_growth, (0, 5)) if rev_growth is not None else "Data Unavailable",
-        "Net Income Growth": RatingEngine.rate_value(ni_growth, (0, 5)) if ni_growth is not None else "Data Unavailable",
-        "Operating Margin": RatingEngine.rate_value(op_margin * 100 if op_margin else None, (5, 15)),
-        "ROIC": RatingEngine.rate_value(roic * 100 if roic else None, (8, 12)),
-        "Debt/Equity": "Good" if info.get("debtToEquity") and info["debtToEquity"] < 100 else "Weak"
-    }
+    # --------------------------------------------------
+    # 8) Ratings using sector-specific thresholds
+    # --------------------------------------------------
+    ratings = {}
+    for name, value in metrics.items():
+        if name in thresholds:
+            low, mid = thresholds[name]
+            ratings[name] = RatingEngine.rate_value(value, (low, mid))
+        else:
+            ratings[name] = RatingEngine.rate_value(value)
 
-    # Normalized 0–100 global score
-    score = RatingEngine.compute_global_score(ratings)
+    # Compute global score with sector weights
+    global_score = RatingEngine.compute_global_score(ratings, weights)
 
-    # -----------------------------
+    # --------------------------------------------------
     # 9) Build final report
-    # -----------------------------
+    # --------------------------------------------------
     report = []
-    report.append(f"\nFundamental & Valuation Report for {ticker}")
-    report.append("=" * 60)
+    report.append(f"\nFundamental & Sector-Aware Valuation for {ticker}")
+    report.append("=" * 65)
+    report.append(f"\nDetected Sector: {profile['sector']}")
 
     report.append("\n-- Key Indicators --")
-    report.append(f"Revenue growth (5y avg): {fmt_pct(rev_growth)}")
-    report.append(f"Net income growth (5y avg): {fmt_pct(ni_growth)}")
-    report.append(f"Operating margin: {fmt_pct(op_margin * 100) if op_margin else 'N/A'}")
-    report.append(f"Net margin: {fmt_pct(net_margin * 100) if net_margin else 'N/A'}")
-    report.append(f"ROE: {fmt_pct(roe * 100) if roe else 'N/A'}")
-    report.append(f"ROA: {fmt_pct(roa * 100) if roa else 'N/A'}")
-    report.append(f"ROIC (estimated): {fmt_pct(roic * 100) if roic else 'N/A'}")
-    report.append(f"Debt/Equity: {fmt(info.get('debtToEquity'))}")
-    report.append(f"Free Cash Flow (latest): {fmt(fcf)}")
+    for k, v in metrics.items():
+        line = f"{k}: {fmt_pct(v*100) if isinstance(v, float) else fmt(v)}"
+        report.append(line)
 
-
-    report.append("\n-- Ratings --")
+    report.append("\n-- Ratings (sector-adjusted) --")
     for k, v in ratings.items():
         report.append(f"{k}: {v}")
 
-    report.append(f"\nGlobal Score: {score}/100")
+    report.append(f"\nGlobal Score (sector-weighted): {global_score}/100")
 
     report.append("\n-- Valuation --")
-    report.append(f"WACC used: {fmt_pct(val.get('wacc') * 100) if val.get('wacc') else 'N/A'}")
-    for k, v in val.get("multiples", {}).items():
+    if valuation.get("wacc"):
+        report.append(f"WACC used: {fmt_pct(valuation['wacc']*100)}")
+
+    report.append(f"Preferred multiples: {preferred_multiples}")
+    for k, v in valuation.get("multiples", {}).items():
         report.append(f"{k}: {fmt(v)}")
-    
-    safe_fair, safe_entry = safe_intrinsic_price(info,
-                                                val.get("intrinsic_price"),
-                                                val.get("multiples", {}).get("fair_value"))
 
-    report.append(f"Fair value (combined): {safe_fair}")
-    report.append(f"Entry price (20% safety margin): {safe_entry}")
+
+    multiples_fair = fair_value_from_multiples(info, 
+                                           valuation["multiples"], 
+                                           peer_medians, 
+                                           profile)
+
+    fair_combo = safe_intrinsic_price(
+        info,
+        valuation.get("intrinsic_price"),
+        multiples_fair
+    )
+
+    if fair_combo:
+        fair, entry = fair_combo
+        report.append(f"Fair value (combined): {fair}")
+        report.append(f"Entry price (20% safety margin): {entry}")
+    else:
+        report.append("Fair value (combined): N/A")
+        report.append("Entry price (20% safety margin): N/A")
+
     report.append(f"Current market price: {info.get('currentPrice')}")
-
 
     if peers:
         report.append("\n-- Peer Medians --")
@@ -206,5 +232,8 @@ def run():
     print("\n".join(report))
 
 
+# ------------------------------------------------------
+# RUN
+# ------------------------------------------------------
 if __name__ == "__main__":
     run()
